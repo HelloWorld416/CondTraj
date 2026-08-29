@@ -1,8 +1,7 @@
 # CondTraj
 
 PyTorch implementation of **Fine-Grained Motion Pattern-Guided Conditional
-Diffusion for Pedestrian Trajectory Prediction**. This release supports the SDD
-and NBA datasets.
+Diffusion for Pedestrian Trajectory Prediction**. 
 
 ## Environment
 
