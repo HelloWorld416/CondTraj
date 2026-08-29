@@ -1,0 +1,39 @@
+dataset_type: NBA
+obs_len: 10
+pred_len: 20
+num_epoch: 100
+classifier_epochs: 200
+batchsize: 12
+num_workers: 1
+num_sample: 20
+data_scale: 5
+padding: LastFrame
+
+# AdamW
+lr: 1e-3
+weight_decay: 1e-4
+decay_step: 8
+decay_gamma: 0.5
+
+# Diffusion and classifier guidance
+noise_steps: 1000
+denoising_step: 5
+scheduler: Cosine
+scale: 1.0
+
+# Generator loss
+hyper_param1: 1.0
+hyper_param2: 0.0
+
+# Transformer
+num_layers: 2
+num_heads: 2
+latent_dims: 256
+cls_latent_dims: 256
+dropout: 0.2
+
+# Truncated DCT and training-only stepwise K-Means
+n_pre: 20
+Iter: 100
+pattern: 3
+epsilon: 1e-5

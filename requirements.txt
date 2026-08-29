@@ -1,0 +1,5 @@
+torch>=1.12
+numpy>=1.23
+omegaconf>=2.3
+tqdm>=4.64
+scipy>=1.9
