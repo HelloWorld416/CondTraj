@@ -38,8 +38,6 @@ repository.
 | NBA | 10 | 20 | 20 | 5 | 20 |
 
 Training parameters are defined in `configs/sdd.yml` and `configs/nba.yml`.
-SDD training uses time-reversal augmentation; evaluation does not apply this
-augmentation.
 
 ## Training and Evaluation
 
