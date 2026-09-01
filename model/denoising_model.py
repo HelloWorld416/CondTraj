@@ -18,6 +18,7 @@ class CondTraj(nn.Module):
                  context_dim=256,
                  num_sample=20,
                  tf_layer=2,
+                 reverse_encoder="transformer",
                  **kargs):
         super().__init__()
 
@@ -30,6 +31,11 @@ class CondTraj(nn.Module):
         self.dropout = dropout
         self.activation = activation
         self.input_feats = input_feats
+        self.reverse_encoder = reverse_encoder.lower()
+        if self.reverse_encoder not in {"transformer", "mamba"}:
+            raise ValueError(
+                f"unknown reverse encoder: {reverse_encoder}; expected transformer or mamba"
+            )
         self.time_embed_dim = latent_dim
         self.sequence_embedding = nn.Parameter(torch.randn(num_frames, latent_dim))
         self.output_dim = input_feats * self.num_sample
@@ -78,21 +84,35 @@ class CondTraj(nn.Module):
         self.concat1 = ConcatSquashLinear(
             input_feats, 2 * context_dim, context_dim + 3
         )
-        self.context_embedding = nn.Linear(self.input_feats, context_dim)
-        self.context_pos_emb = PositionalEncoding(
-            d_model=context_dim, dropout=dropout, max_len=self.num_frames
-        )
-        context_layer = nn.TransformerEncoderLayer(
-            d_model=context_dim,
-            nhead=num_heads,
-            dim_feedforward=context_dim,
-            dropout=dropout,
-            activation=activation,
-            batch_first=True,
-        )
-        self.context_encoder = nn.TransformerEncoder(
-            context_layer, num_layers=tf_layer
-        )
+        if self.reverse_encoder == "mamba":
+            from mamba_ssm.ops.triton.layernorm import RMSNorm
+            from .mamba_model import Mamba, Block
+
+            self.context_encoder = Block(
+                dim=self.input_feats,
+                mixer_cls=Mamba,
+                norm_cls=RMSNorm,
+                fused_add_norm=True,
+            )
+            self.hidden_encoder = nn.Linear(
+                self.num_frames * self.input_feats, context_dim, bias=False
+            )
+        else:
+            self.context_embedding = nn.Linear(self.input_feats, context_dim)
+            self.context_pos_emb = PositionalEncoding(
+                d_model=context_dim, dropout=dropout, max_len=self.num_frames
+            )
+            context_layer = nn.TransformerEncoderLayer(
+                d_model=context_dim,
+                nhead=num_heads,
+                dim_feedforward=context_dim,
+                dropout=dropout,
+                activation=activation,
+                batch_first=True,
+            )
+            self.context_encoder = nn.TransformerEncoder(
+                context_layer, num_layers=tf_layer
+            )
 
         self.concat3 = ConcatSquashLinear(2 * context_dim, context_dim, context_dim + 3)
         self.concat4 = ConcatSquashLinear(context_dim, context_dim // 2, context_dim + 3)
@@ -100,17 +120,32 @@ class CondTraj(nn.Module):
             context_dim // 2, input_feats, context_dim + 3
         )
 
-        denoising_layer = nn.TransformerEncoderLayer(
-            d_model=2 * context_dim,
-            nhead=num_heads,
-            dim_feedforward=2 * context_dim,
-            dropout=dropout,
-            activation=activation,
-            batch_first=True,
-        )
-        self.denoising_transformer = nn.TransformerEncoder(
-            denoising_layer, num_layers=tf_layer
-        )
+        if self.reverse_encoder == "mamba":
+            self.mamba_block1 = Block(
+                dim=2 * context_dim,
+                mixer_cls=Mamba,
+                norm_cls=RMSNorm,
+                fused_add_norm=True,
+            )
+            self.mamba_block2 = Block(
+                dim=2 * context_dim,
+                mixer_cls=Mamba,
+                norm_cls=RMSNorm,
+                fused_add_norm=True,
+            )
+            self.mamba_act = nn.SiLU()
+        else:
+            denoising_layer = nn.TransformerEncoderLayer(
+                d_model=2 * context_dim,
+                nhead=num_heads,
+                dim_feedforward=2 * context_dim,
+                dropout=dropout,
+                activation=activation,
+                batch_first=True,
+            )
+            self.denoising_transformer = nn.TransformerEncoder(
+                denoising_layer, num_layers=tf_layer
+            )
 
     def _decode_temporal(self, h, emb):
         residuals = []
@@ -151,9 +186,15 @@ class CondTraj(nn.Module):
     def generate_accelerate(self, x, beta, context):
         beta = beta.view(beta.size(0), 1, 1)
 
-        context = self.context_embedding(context)
-        context = self.context_pos_emb(context.permute(1, 0, 2)).permute(1, 0, 2)
-        context = self.context_encoder(context).mean(dim=1, keepdim=True)
+        if self.reverse_encoder == "mamba":
+            context_hidden, context_residual = self.context_encoder(context)
+            context = self.hidden_encoder(
+                (context_hidden + context_residual).reshape(context.shape[0], -1)
+            ).unsqueeze(1)
+        else:
+            context = self.context_embedding(context)
+            context = self.context_pos_emb(context.permute(1, 0, 2)).permute(1, 0, 2)
+            context = self.context_encoder(context).mean(dim=1, keepdim=True)
 
         time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)
         ctx_emb = torch.cat([time_emb, context], dim=-1)
@@ -163,7 +204,14 @@ class CondTraj(nn.Module):
         final_emb = x.permute(1, 0, 2)
         final_emb = self.pos_emb(final_emb).contiguous().permute(1, 0, 2)
 
-        trans = self.denoising_transformer(final_emb)
+        if self.reverse_encoder == "mamba":
+            trans_hidden, trans_residual = self.mamba_block1(final_emb)
+            trans_hidden, trans_residual = self.mamba_block2(
+                trans_hidden, trans_residual
+            )
+            trans = self.mamba_act(trans_hidden + trans_residual)
+        else:
+            trans = self.denoising_transformer(final_emb)
 
         trans = self.concat3.batch_generate(ctx_emb, trans)
         trans = self.concat4.batch_generate(ctx_emb, trans)

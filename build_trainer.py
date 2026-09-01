@@ -239,9 +239,7 @@ class Trainer:
             self.scheduler = None
         else:
             datasets = build_datasets(cfg, clusterer_state=clusterer_state)
-            self.train_loader, self.test_loader = build_loaders(
-                cfg, *datasets, test_batch_size=cfg.batchsize
-            )
+            self.train_loader, self.test_loader = build_loaders(cfg, *datasets)
             self.optimizer = torch.optim.AdamW(
                 model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
             )
@@ -337,8 +335,10 @@ class Trainer:
     def _validate(self):
         self.model.eval()
         total_apd = 0.0
-        total_ade = 0.0
-        total_fde = 0.0
+        nba_evaluation = self.cfg.dataset_type == "NBA"
+        horizons = (5, 10, 15, 20) if nba_evaluation else (self.cfg.pred_len,)
+        total_ade = [0.0] * len(horizons)
+        total_fde = [0.0] * len(horizons)
         samples = 0
         for data in tqdm(self.test_loader, leave=False):
             trajectory, padded, future, _ = process_batch(self.cfg, data)
@@ -347,14 +347,31 @@ class Trainer:
             predictions = predictions.detach()
             distances = torch.linalg.vector_norm(predictions - future[:, None], dim=-1)
             total_apd += self.average_pairwise_distance(predictions)
-            total_ade += distances.mean(dim=-1).min(dim=1).values.sum().item()
-            total_fde += distances[:, :, -1].min(dim=1).values.sum().item()
+            for index, horizon in enumerate(horizons):
+                horizon_distances = distances[:, :, :horizon]
+                total_ade[index] += (
+                    horizon_distances.mean(dim=-1).min(dim=1).values.sum().item()
+                )
+                total_fde[index] += (
+                    horizon_distances[:, :, -1].min(dim=1).values.sum().item()
+                )
             samples += len(trajectory)
-        return (
-            total_apd / samples,
-            total_ade / samples * self.cfg.data_scale,
-            total_fde / samples * self.cfg.data_scale,
-        )
+        ade = [value / samples * self.cfg.data_scale for value in total_ade]
+        fde = [value / samples * self.cfg.data_scale for value in total_fde]
+        if not nba_evaluation:
+            ade, fde = ade[0], fde[0]
+        return total_apd / samples, ade, fde
+
+    def format_metrics(self, apd, ade, fde):
+        if self.cfg.dataset_type != "NBA":
+            return f"APD={apd:.4f} minADE={ade:.4f} minFDE={fde:.4f}"
+        metrics = [f"APD={apd:.4f}"]
+        for second, (horizon_ade, horizon_fde) in enumerate(zip(ade, fde), start=1):
+            metrics.append(
+                f"minADE({second}s)={horizon_ade:.4f} "
+                f"minFDE({second}s)={horizon_fde:.4f}"
+            )
+        return " ".join(metrics)
 
     def loop(self):
         best_ade = float("inf")
@@ -365,8 +382,9 @@ class Trainer:
             message = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] generator {epoch:03d} loss={train_loss:.4f}"
             if epoch % self.cfg.eval_iter == 0:
                 apd, ade, fde = self._validate()
-                message += f" APD={apd:.4f} minADE={ade:.4f} minFDE={fde:.4f}"
-                if ade < best_ade:
-                    best_ade = ade
+                message += f" {self.format_metrics(apd, ade, fde)}"
+                checkpoint_ade = ade[-1] if self.cfg.dataset_type == "NBA" else ade
+                if checkpoint_ade < best_ade:
+                    best_ade = checkpoint_ade
                     torch.save({"model_dict": self.model.state_dict()}, self.checkpoint_path)
             print_log(message, self.log)

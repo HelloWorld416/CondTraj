@@ -3,7 +3,7 @@ obs_len: 10
 pred_len: 20
 num_epoch: 100
 classifier_epochs: 200
-batchsize: 12
+batchsize: 16
 num_workers: 1
 num_sample: 20
 data_scale: 5
@@ -17,7 +17,7 @@ decay_gamma: 0.5
 
 # Diffusion and classifier guidance
 noise_steps: 1000
-denoising_step: 5
+denoising_step: 3
 scheduler: Cosine
 scale: 1.0
 

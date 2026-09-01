@@ -1,14 +1,20 @@
 import unittest
+from types import SimpleNamespace
 
 import torch
 from omegaconf import OmegaConf
 
-from main import print_trainable_parameters
+from build_trainer import Trainer
+from main import print_trainable_parameters, reverse_encoder_for_dataset
 from model.denoising_model import CondTraj
 
 
 class TransformerStructureTests(unittest.TestCase):
-    def test_condtraj_uses_transformer_structure(self):
+    def test_reverse_encoder_is_selected_by_dataset(self):
+        self.assertEqual(reverse_encoder_for_dataset("SDD"), "transformer")
+        self.assertEqual(reverse_encoder_for_dataset("NBA"), "mamba")
+
+    def test_sdd_condtraj_uses_transformer_reverse_encoder(self):
         model = CondTraj(
             input_feats=2,
             num_frames=10,
@@ -17,6 +23,7 @@ class TransformerStructureTests(unittest.TestCase):
             num_heads=2,
             num_sample=2,
             dropout=0.0,
+            reverse_encoder="transformer",
         )
         self.assertIsInstance(model.context_encoder, torch.nn.TransformerEncoder)
         self.assertIsInstance(model.denoising_transformer, torch.nn.TransformerEncoder)
@@ -38,6 +45,30 @@ class TransformerStructureTests(unittest.TestCase):
         )
         self.assertEqual(predicted_noise.shape, trajectory.shape)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "Mamba reverse encoder requires CUDA")
+    def test_nba_condtraj_uses_mamba_reverse_encoder(self):
+        from model.mamba_model import Block
+
+        model = CondTraj(
+            input_feats=2,
+            num_frames=20,
+            latent_dim=512,
+            num_layers=2,
+            num_heads=2,
+            num_sample=20,
+            dropout=0.2,
+            reverse_encoder="mamba",
+        ).cuda().eval()
+        self.assertEqual(model.reverse_encoder, "mamba")
+        self.assertIsInstance(model.context_encoder, Block)
+        self.assertIsInstance(model.mamba_block1, Block)
+        self.assertIsInstance(model.mamba_block2, Block)
+        trajectory = torch.randn(2, 20, 2, device="cuda")
+        predicted_noise = model.generate_accelerate(
+            trajectory, torch.tensor([0.01, 0.02], device="cuda"), trajectory
+        )
+        self.assertEqual(predicted_noise.shape, trajectory.shape)
+
     def test_step_lr_configuration_is_complete(self):
         expected_steps = {"sdd": 10, "nba": 8}
         for dataset, expected_step in expected_steps.items():
@@ -53,6 +84,25 @@ class TransformerStructureTests(unittest.TestCase):
             self.assertGreater(config.latent_dims, 0)
             self.assertGreaterEqual(config.hyper_param1, 0.0)
             self.assertGreaterEqual(config.hyper_param2, 0.0)
+
+    def test_nba_specific_training_configuration(self):
+        nba = OmegaConf.load("configs/nba.yml")
+        sdd = OmegaConf.load("configs/sdd.yml")
+        self.assertEqual(nba.batchsize, 16)
+        self.assertEqual(sdd.batchsize, 64)
+
+    def test_nba_metrics_report_all_four_horizons(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.cfg = SimpleNamespace(dataset_type="NBA")
+        output = trainer.format_metrics(
+            1.0,
+            [0.1, 0.2, 0.3, 0.4],
+            [0.2, 0.3, 0.4, 0.5],
+        )
+        for second in range(1, 5):
+            self.assertIn(f"minADE({second}s)", output)
+            self.assertIn(f"minFDE({second}s)", output)
+
     def test_trainable_parameter_counter(self):
         model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.Linear(4, 2))
         model[1].weight.requires_grad_(False)

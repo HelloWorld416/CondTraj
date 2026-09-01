@@ -30,6 +30,10 @@ def print_trainable_parameters(name: str, model: torch.nn.Module) -> int:
     return parameters
 
 
+def reverse_encoder_for_dataset(dataset_type: str) -> str:
+    return "mamba" if dataset_type.upper() == "NBA" else "transformer"
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", default="./data")
@@ -102,6 +106,7 @@ def main():
         latent_dim=cfg.latent_dims,
         dropout=cfg.dropout,
         num_sample=cfg.num_sample,
+        reverse_encoder=reverse_encoder_for_dataset(cfg.dataset_type),
     )
     if args.mode == "train":
         print_trainable_parameters("CondTraj", model)
@@ -124,10 +129,7 @@ def main():
         checkpoint = torch.load(model_path, map_location="cpu")
         model.load_state_dict(checkpoint["model_dict"], strict=True)
         apd, ade, fde = trainer._validate()
-        print(
-            f"best-of-{cfg.num_sample} APD={apd:.4f} "
-            f"minADE={ade:.4f} minFDE={fde:.4f}"
-        )
+        print(f"best-of-{cfg.num_sample} {trainer.format_metrics(apd, ade, fde)}")
 
 
 if __name__ == "__main__":
